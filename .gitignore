@@ -1,0 +1,9 @@
+build/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.tmp
+
+dist/*
+!dist/PainelInformativosGarbuio.exe
