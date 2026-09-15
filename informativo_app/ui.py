@@ -14,6 +14,14 @@ from .config import (
     REQUIRED_FIELD_DEFINITIONS,
 )
 from .docx_writer import create_docx
+from .email_groups import (
+    EmailGroupError,
+    find_email_group,
+    import_groups_from_xlsx,
+    load_email_groups,
+    save_email_groups,
+)
+from .outlook_mailer import OutlookDraftError, create_outlook_draft
 from .text_builder import (
     build_attachment_lines,
     build_text,
@@ -39,13 +47,15 @@ class InformativoApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        icon_path = Path(__file__).resolve().parent / "assets" / "garbuio.ico"
+        icon_path = Path(__file__).resolve().parent / "assets" / "garbuio_icon.ico"
         if icon_path.exists():
             self.root.iconbitmap(str(icon_path))
         self.root.minsize(1040, 760)
         self.root.configure(bg=COLOR_BACKGROUND)
 
-        self.entries: dict[str, ttk.Entry] = {}
+        self.entries: dict[str, ttk.Entry | ttk.Combobox] = {}
+        self.email_groups = load_email_groups()
+        self.operation_field: ttk.Combobox | None = None
         self.classification_vars: dict[str, tk.BooleanVar] = {}
         self.selected_classification = "INFORMATIVO"
         self.open_after_save = tk.BooleanVar(value=False)
@@ -62,20 +72,6 @@ class InformativoApp:
         style.configure("Card.TFrame", background=COLOR_SURFACE, relief="flat")
         style.configure("Header.TFrame", background=COLOR_SURFACE, relief="flat")
         style.configure("Controls.TFrame", background=COLOR_SURFACE)
-        
-        style.configure(
-        "Footer.TLabel",
-        background=COLOR_BACKGROUND,
-        foreground=COLOR_MUTED,
-        font=("Segoe UI", 8),
-    )
-        style.configure(
-        "Footer.TLabel",
-        background=COLOR_BACKGROUND,
-        foreground=COLOR_MUTED,
-        font=("Segoe UI", 8),
-    )
-
 
         style.configure(
             "HeaderTitle.TLabel",
@@ -106,6 +102,12 @@ class InformativoApp:
             background=COLOR_SURFACE,
             foreground=COLOR_GREEN_DARK,
             font=("Segoe UI", 9, "bold"),
+        )
+        style.configure(
+            "Footer.TLabel",
+            background=COLOR_BACKGROUND,
+            foreground=COLOR_MUTED,
+            font=("Segoe UI", 8),
         )
         style.configure(
             "TEntry",
@@ -173,6 +175,21 @@ class InformativoApp:
         entry.grid(row=row, column=1, sticky="ew", pady=6)
         entry.bind("<KeyRelease>", lambda _event: self.update_preview())
         self.entries[key] = entry
+
+    def _add_operation_selector(self, parent: ttk.Frame, row: int) -> None:
+        ttk.Label(parent, text="Operação:", style="FieldLabel.TLabel").grid(
+            row=row, column=0, sticky="w", pady=6
+        )
+        field = ttk.Combobox(
+            parent,
+            values=self._operation_names(),
+            font=("Segoe UI", 10),
+        )
+        field.grid(row=row, column=1, sticky="ew", pady=6)
+        field.bind("<KeyRelease>", lambda _event: self.update_preview())
+        field.bind("<<ComboboxSelected>>", lambda _event: self.update_preview())
+        self.operation_field = field
+        self.entries["operacao"] = field
 
     def _add_classification_selector(self, parent: ttk.Frame, row: int) -> None:
         ttk.Label(parent, text="Classificação:", style="FieldLabel.TLabel").grid(
@@ -243,7 +260,10 @@ class InformativoApp:
         current_row += 1
 
         for label, key in FIELD_DEFINITIONS:
-            self._add_entry(form_card, current_row, label, key)
+            if key == "operacao":
+                self._add_operation_selector(form_card, current_row)
+            else:
+                self._add_entry(form_card, current_row, label, key)
             current_row += 1
 
         self.entries["data_hora"].insert(0, current_date_time())
@@ -321,15 +341,36 @@ class InformativoApp:
             command=self.save_word_file,
         ).grid(row=0, column=1, sticky="w", padx=(0, 8))
 
+        ttk.Button(
+            buttons,
+            text="Criar e-mail no Outlook",
+            style="Primary.TButton",
+            command=self.create_email_draft,
+        ).grid(row=0, column=2, sticky="w", padx=(0, 8))
+
         ttk.Button(buttons, text="Limpar", style="Secondary.TButton", command=self.clear_form).grid(
-            row=0, column=2, sticky="w", padx=(0, 8)
+            row=0, column=3, sticky="w", padx=(0, 8)
         )
+
+        ttk.Button(
+            buttons,
+            text="Importar grupos de e-mail",
+            style="Secondary.TButton",
+            command=self.import_email_groups,
+        ).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(10, 0))
 
         ttk.Checkbutton(
             buttons,
             text="Abrir Word depois de gerar",
             variable=self.open_after_save,
-        ).grid(row=0, column=3, sticky="w")
+        ).grid(row=1, column=1, columnspan=3, sticky="w", pady=(10, 0))
+
+        if self.email_groups:
+            ttk.Label(
+                buttons,
+                text=f"{len(self.email_groups)} grupos carregados",
+                style="Status.TLabel",
+            ).grid(row=1, column=4, sticky="e", pady=(10, 0))
 
         self.status = ttk.Label(preview_card, text="", style="Status.TLabel")
         self.status.grid(row=3, column=0, sticky="w", pady=(12, 0))
@@ -342,6 +383,68 @@ class InformativoApp:
             text="Desenvolvido por Abiézer W. Gonçalez",
             style="Footer.TLabel",
         ).grid(row=0, column=0, sticky="e")
+
+    def _operation_names(self) -> list[str]:
+        return [
+            str(group.get("operacao", "")).strip()
+            for group in self.email_groups
+            if str(group.get("operacao", "")).strip()
+        ]
+
+    def _update_operation_values(self) -> None:
+        if self.operation_field is not None:
+            self.operation_field.configure(values=self._operation_names())
+
+    def import_email_groups(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="Importar grupos de e-mail",
+            filetypes=[("Planilha Excel", "*.xlsx")],
+        )
+        if not file_path:
+            return
+
+        try:
+            groups = import_groups_from_xlsx(file_path)
+            save_email_groups(groups, file_path)
+        except EmailGroupError as error:
+            messagebox.showerror("Erro ao importar grupos", str(error))
+            return
+
+        self.email_groups = groups
+        self._update_operation_values()
+        self.status.configure(text=f"{len(groups)} grupos de e-mail importados.")
+        messagebox.showinfo(
+            "Grupos importados",
+            f"{len(groups)} operações foram importadas com sucesso.",
+        )
+
+    def create_email_draft(self) -> None:
+        if not self.confirm_when_missing():
+            return
+
+        if not self.email_groups:
+            messagebox.showwarning(
+                "Grupos não importados",
+                "Importe a planilha de grupos de e-mail antes de criar o rascunho.",
+            )
+            return
+
+        data = self.get_data()
+        group = find_email_group(self.email_groups, data.get("operacao", ""))
+        if not group:
+            messagebox.showwarning(
+                "Operação sem grupo",
+                "Não encontrei grupo de e-mail para a operação selecionada.",
+            )
+            return
+
+        try:
+            create_outlook_draft(data, group)
+        except OutlookDraftError as error:
+            messagebox.showerror("Erro ao criar e-mail", str(error))
+            return
+
+        self.status.configure(text="Rascunho criado no Outlook.")
 
     def get_data(self) -> dict[str, str]:
         data = {key: entry.get() for key, entry in self.entries.items()}
@@ -436,7 +539,10 @@ class InformativoApp:
 
     def clear_form(self) -> None:
         for key, entry in self.entries.items():
-            entry.delete(0, "end")
+            if isinstance(entry, ttk.Combobox):
+                entry.set("")
+            else:
+                entry.delete(0, "end")
             if key == "data_hora":
                 entry.insert(0, current_date_time())
 
