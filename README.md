@@ -28,4 +28,4 @@ A seção `Documentos Anexos` aparece logo abaixo da descrição no corpo do doc
 
 O cabeçalho do Word usa a classificação marcada na tela, por exemplo:
 
-`VAZAMENTO – 21/05/2026 – MAURILHO CEZAR BONFA - RVQ5G82 – CLAROS`
+`VAZAMENTO – 21/05/2026 – NOME CONDUTOR - PLACA CAMINHÃO – OPERAÇÃO`
